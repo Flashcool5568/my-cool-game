@@ -6,16 +6,14 @@ const path = require('path');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: '*', // Allow all for simplicity; restrict in production
-        methods: ['GET', 'POST']
-    }
+    cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
 const PORT = process.env.PORT || 3000;
-
 const players = {};
 const projectiles = {};
+const bots = {}; // ← NEW: our bots live here
+
 const PLAYER_SPEED = 5;
 const PROJECTILE_SPEED = 5;
 const PROJECTILE_RADIUS = 5;
@@ -23,102 +21,162 @@ const PLAYER_RADIUS = 10;
 const CANVAS_WIDTH = 1024;
 const CANVAS_HEIGHT = 576;
 
-// Serve the frontend from /public
+// Serve frontend
 app.use(express.static(path.join(__dirname, 'public')));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+// ──────────────────────────────
+// BOT SPAWNER (runs once on start)
+// ──────────────────────────────
+function spawnBot() {
+    const id = `bot_${Date.now()}_${Math.random()}`;
+    bots[id] = {
+        x: Math.random() * (CANVAS_WIDTH - 60) + 30,
+        y: Math.random() * (CANVAS_HEIGHT - 60) + 30,
+        radius: PLAYER_RADIUS,
+        color: 'red',           // bots are red
+        score: 0,
+        isBot: true,
+        last fired: 0
+    };
+}
+for (let i = 0; i < 10; i++) spawnBot(); // spawn 10 bots
 
+// ──────────────────────────────
+// CONNECTIONS
+// ──────────────────────────────
 io.on('connection', (socket) => {
     console.log(`Player connected: ${socket.id}`);
 
-    // Initialize new player
+    // Create real player
     players[socket.id] = {
-        x: Math.random() * (CANVAS_WIDTH - 2 * PLAYER_RADIUS) + PLAYER_RADIUS,
-        y: Math.random() * (CANVAS_HEIGHT - 2 * PLAYER_RADIUS) + PLAYER_RADIUS,
+        x: Math.random() * (CANVAS_WIDTH - 60) + 30,
+        y: Math.random() * (CANVAS_HEIGHT - 60) + 30,
         radius: PLAYER_RADIUS,
         color: `hsl(${360 * Math.random()}, 100%, 50%)`,
         score: 0,
         keys: { w: false, a: false, s: false, d: false }
     };
 
-    // Send initial state
-    socket.emit('init', {
-        id: socket.id,
-        players,
-        projectiles
-    });
+    socket.emit('init', { id: socket.id, players, projectiles, bots });
 
-    // Handle key updates
     socket.on('updateKeys', (keys) => {
-        if (players[socket.id]) {
-            players[socket.id].keys = keys;
-        }
+        if (players[socket.id]) players[socket.id].keys = keys;
     });
 
-    // Handle shooting
     socket.on('shoot', ({ x, y, velocity }) => {
         const projectileId = Date.now() + Math.random();
         projectiles[projectileId] = {
-            x,
-            y,
-            velocity,
+            x, y, velocity,
             color: players[socket.id].color,
             playerId: socket.id,
             radius: PROJECTILE_RADIUS
         };
     });
 
-    // Handle disconnect
     socket.on('disconnect', () => {
         console.log(`Player disconnected: ${socket.id}`);
         delete players[socket.id];
     });
 });
 
-// Game loop (runs at ~60 FPS)
+// ──────────────────────────────
+// GAME LOOP (~60 FPS)
+// ──────────────────────────────
 setInterval(() => {
-    // Update players
-    Object.keys(players).forEach(id => {
-        const player = players[id];
-        const keys = player.keys;
+    const now = Date.now();
 
-        if (keys.w) player.y = Math.max(player.radius, player.y - PLAYER_SPEED);
-        if (keys.a) player.x = Math.max(player.radius, player.x - PLAYER_SPEED);
-        if (keys.s) player.y = Math.min(CANVAS_HEIGHT - player.radius, player.y + PLAYER_SPEED);
-        if (keys.d) player.x = Math.min(CANVAS_WIDTH - player.radius, player.x + PLAYER_SPEED);
+    // ── Move real players
+    Object.keys(players).forEach(id => {
+        const p = players[id];
+        if (p.keys.w) p.y = Math.max(p.radius, p.y - PLAYER_SPEED);
+        if (p.keys.a) p.x = Math.max(p.radius, p.x - PLAYER_SPEED);
+        if (p.keys.s) p.y = Math.min(CANVAS_HEIGHT - p.radius, p.y + PLAYER_SPEED);
+        if (p.keys.d) p.x = Math.min(CANVAS_WIDTH - p.radius, p.x + PLAYER_SPEED);
     });
 
-    // Update projectiles and check collisions
+    // ── Bot AI: chase closest player + shoot
+    Object.keys(bots).forEach(botId => {
+        const bot = bots[botId];
+        let closest = null;
+        let closestDist = Infinity;
+
+        // Find closest player
+        Object.keys(players).forEach(pid => {
+            const pl = players[pid];
+            const dx = pl.x - bot.x;
+            const dy = pl.y - bot.y;
+            const dist = dx*dx + dy*dy;
+            if (dist < closestDist) {
+                closestDist = dist;
+                closest = pl;
+            }
+        });
+
+        if (closest) {
+            const dx = closest.x - bot.x;
+            const dy = closest.y - bot.y;
+            const angle = Math.atan2(dy, dx);
+            const speed = 2.2; // bot speed
+            bot.x += Math.cos(angle) * speed;
+            bot.y += Math.sin(angle) * speed;
+
+            // Shoot every ~1.5 seconds
+            if (now - bot.lastFired > 1500) {
+                const projId = `botproj_${now}_${Math.random()}`;
+                projectiles[projId] = {
+                    x: bot.x,
+                    y: bot.y,
+                    velocity: { x: Math.cos(angle) * 1.2, y: Math.sin(angle) * 1.2 },
+                    color: 'red',
+                    playerId: botId,
+                    radius: PROJECTILE_RADIUS
+                };
+                bot.lastFired = now;
+            }
+        }
+    });
+
+    // ── Move projectiles + collisions
     Object.keys(projectiles).forEach(id => {
         const proj = projectiles[id];
         proj.x += proj.velocity.x * PROJECTILE_SPEED;
         proj.y += proj.velocity.y * PROJECTILE_SPEED;
 
-        // Check collisions with players
-        Object.keys(players).forEach(playerId => {
-            if (playerId === proj.playerId) return; // Can't hit yourself
-            const player = players[playerId];
-            const dx = proj.x - player.x;
-            const dy = proj.y - player.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            if (distance < proj.radius + player.radius) {
-                // Hit: increase shooter's score, remove hit player and projectile
+        // Hit players
+        Object.keys(players).forEach(pid => {
+            if (pid === proj.playerId) return;
+            const pl = players[pid];
+            const dist = Math.hypot(proj.x - pl.x, proj.y - pl.y);
+            if (dist < proj.radius + pl.radius) {
                 if (players[proj.playerId]) players[proj.playerId].score += 1;
-                delete players[playerId]; // Remove hit player (they can reconnect to respawn)
+                else if (bots[proj.playerId]) bots[proj.playerId].score += 1;
+                delete players[pid];
                 delete projectiles[id];
             }
         });
 
-        // Remove projectiles outside canvas
-        if (proj.x < 0 || proj.x > CANVAS_WIDTH || proj.y < 0 || proj.y > CANVAS_HEIGHT) {
+        // Hit bots
+        Object.keys(bots).forEach(botId => {
+            if (botId === proj.playerId) return;
+            const bot = bots[botId];
+            const dist = Math.hypot(proj.x - bot.x, proj.y - bot.y);
+            if (dist < proj.radius + bot.radius) {
+                if (players[proj.playerId]) players[proj.playerId].score += 1;
+                delete bots[botId];
+                setTimeout(() => spawnBot(), 3000); // respawn after 3s
+                delete projectiles[id];
+            }
+        });
+
+        // Out of bounds
+        if (proj.x < -50 || proj.x > CANVAS_WIDTH + 50 || proj.y < -50 || proj.y > CANVAS_HEIGHT + 50) {
             delete projectiles[id];
         }
     });
 
-    // Broadcast updated state to all clients
-    io.emit('update', { players, projectiles });
+    // ── Send everything to clients
+    io.emit('update', { players, projectiles, bots });
 }, 1000 / 60);
 
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
