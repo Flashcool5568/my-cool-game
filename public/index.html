@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multiplayer Canvas Game</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: #000;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            border: 1px solid #fff;
+            background-color: #111;
+        }
+        #score {
+            color: white;
+            font-size: 24px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="1024" height="576"></canvas>
+    <div id="score">Score: 0</div>
+
+    <script src="/socket.io/socket.io.js"></script>  <!-- Served by the backend -->
+    <script>
+        // Connect to the backend (automatically uses the same host)
+        const socket = io();
+
+        const canvas = document.getElementById('canvas');
+        const c = canvas.getContext('2d');
+        const scoreEl = document.getElementById('score');
+
+        // Handle device pixel ratio
+        const devicePixelRatio = window.devicePixelRatio || 1;
+        canvas.width = 1024 * devicePixelRatio;
+        canvas.height = 576 * devicePixelRatio;
+        c.scale(devicePixelRatio, devicePixelRatio);
+
+        // Game constants
+        const CANVAS_WIDTH = 1024;
+        const CANVAS_HEIGHT = 576;
+        const PLAYER_SPEED = 5;
+        const PROJECTILE_RADIUS = 5;
+
+        // Player class
+        class Player {
+            constructor(x, y, radius, color) {
+                this.x = x;
+                this.y = y;
+                this.radius = radius;
+                this.color = color;
+                this.score = 0;
+            }
+
+            draw() {
+                c.save();
+                c.shadowColor = this.color;
+                c.shadowBlur = 20;
+                c.beginPath();
+                c.arc(this.x, this.y, this.radius, 0, Math.PI * 2, false);
+                c.fillStyle = this.color;
+                c.fill();
+                c.restore();
+            }
+        }
+
+        // Projectile class
+        class Projectile {
+            constructor(x, y, velocity, color) {
+                this.x = x;
+                this.y = y;
+                this.radius = PROJECTILE_RADIUS;
+                this.color = color;
+                this.velocity = velocity;
+            }
+
+            draw() {
+                c.save();
+                c.shadowColor = this.color;
+                c.shadowBlur = 20;
+                c.beginPath();
+                c.arc(this.x, this.y, this.radius, 0, Math.PI * 2, false);
+                c.fillStyle = this.color;
+                c.fill();
+                c.restore();
+            }
+        }
+
+        // Game state
+        let player = null;
+        const players = {};
+        const projectiles = {};
+
+        // Input handling
+        const keys = { w: false, a: false, s: false, d: false };
+
+        window.addEventListener('keydown', ({ code }) => {
+            switch (code) {
+                case 'KeyW': keys.w = true; break;
+                case 'KeyA': keys.a = true; break;
+                case 'KeyS': keys.s = true; break;
+                case 'KeyD': keys.d = true; break;
+            }
+            socket.emit('updateKeys', keys);
+        });
+
+        window.addEventListener('keyup', ({ code }) => {
+            switch (code) {
+                case 'KeyW': keys.w = false; break;
+                case 'KeyA': keys.a = false; break;
+                case 'KeyS': keys.s = false; break;
+                case 'KeyD': keys.d = false; break;
+            }
+            socket.emit('updateKeys', keys);
+        });
+
+        canvas.addEventListener('click', (event) => {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const mouseX = (event.clientX - rect.left) * scaleX / devicePixelRatio;
+            const mouseY = (event.clientY - rect.top) * scaleY / devicePixelRatio;
+
+            const angle = Math.atan2(mouseY - player.y, mouseX - player.x);
+            const velocity = { x: Math.cos(angle), y: Math.sin(angle) };
+            socket.emit('shoot', { x: player.x, y: player.y, velocity });
+        });
+
+        // Socket.io event listeners
+        socket.on('init', ({ id, players: initPlayers, projectiles: initProjectiles }) => {
+            player = new Player(initPlayers[id].x, initPlayers[id].y, initPlayers[id].radius, initPlayers[id].color);
+            scoreEl.textContent = `Score: ${initPlayers[id].score}`;
+            Object.keys(initPlayers).forEach(playerId => {
+                players[playerId] = new Player(
+                    initPlayers[playerId].x,
+                    initPlayers[playerId].y,
+                    initPlayers[playerId].radius,
+                    initPlayers[playerId].color
+                );
+                players[playerId].score = initPlayers[playerId].score;
+            });
+            Object.keys(initProjectiles).forEach(projId => {
+                projectiles[projId] = new Projectile(
+                    initProjectiles[projId].x,
+                    initProjectiles[projId].y,
+                    initProjectiles[projId].velocity,
+                    initProjectiles[projId].color
+                );
+            });
+        });
+
+        socket.on('update', ({ players: updatedPlayers, projectiles: updatedProjectiles }) => {
+            Object.keys(updatedPlayers).forEach(playerId => {
+                if (!players[playerId]) {
+                    players[playerId] = new Player(
+                        updatedPlayers[playerId].x,
+                        updatedPlayers[playerId].y,
+                        updatedPlayers[playerId].radius,
+                        updatedPlayers[playerId].color
+                    );
+                }
+                players[playerId].x = updatedPlayers[playerId].x;
+                players[playerId].y = updatedPlayers[playerId].y;
+                players[playerId].score = updatedPlayers[playerId].score;
+                if (playerId === socket.id) {
+                    player.x = updatedPlayers[playerId].x;
+                    player.y = updatedPlayers[playerId].y;
+                    scoreEl.textContent = `Score: ${updatedPlayers[playerId].score}`;
+                }
+            });
+
+            Object.keys(players).forEach(playerId => {
+                if (!updatedPlayers[playerId]) delete players[playerId];
+            });
+
+            Object.keys(updatedProjectiles).forEach(projId => {
+                if (!projectiles[projId]) {
+                    projectiles[projId] = new Projectile(
+                        updatedProjectiles[projId].x,
+                        updatedProjectiles[projId].y,
+                        updatedProjectiles[projId].velocity,
+                        updatedProjectiles[projId].color
+                    );
+                }
+                projectiles[projId].x = updatedProjectiles[projId].x;
+                projectiles[projId].y = updatedProjectiles[projId].y;
+            });
+
+            Object.keys(projectiles).forEach(projId => {
+                if (!updatedProjectiles[projId]) delete projectiles[projId];
+            });
+        });
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            c.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            // Draw all players
+            Object.values(players).forEach(p => p.draw());
+
+            // Draw all projectiles
+            Object.values(projectiles).forEach(proj => proj.draw());
+
+            // Draw local player (ensure it's on top)
+            if (player) player.draw();
+        }
+
+        animate();
+    </script>
+</body>
+</html>
+
